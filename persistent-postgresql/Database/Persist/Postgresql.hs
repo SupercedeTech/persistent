@@ -1030,7 +1030,8 @@ getColumn getter tableName' [ PersistText columnName
                   , " but got: "
                   , show xs
                   ]
-
+    -- TODO: Refactor this for reuse outside of migration
+    -- autogenerator
     getType "int4"        = pure SqlInt32
     getType "int8"        = pure SqlInt64
     getType "varchar"     = pure SqlString
