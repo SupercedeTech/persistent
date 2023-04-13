@@ -770,6 +770,7 @@ getColumns getter def cols = do
             , ",numeric_precision "
             , ",numeric_scale "
             , ",character_maximum_length "
+            , ",collation_name "
             , "FROM information_schema.columns "
             , "WHERE table_catalog=current_database() "
             , "AND table_schema=current_schema() "
@@ -902,6 +903,7 @@ getColumn getter tableName' [ PersistText columnName
                             , numericPrecision
                             , numericScale
                             , maxlen
+                            , collation
                             ] refName_ = runExceptT $ do
     defaultValue' <-
         case defaultValue of
@@ -942,6 +944,7 @@ getColumn getter tableName' [ PersistText columnName
         , cGenerated = fmap stripSuffixes generationExpression'
         , cDefaultConstraintName = Nothing
         , cMaxLen = Nothing
+        , cCollation = parseCollation collation
         , cReference = fmap (\(a,b,c,d) -> ColumnReference a b (mkCascade c d)) ref
         }
 
@@ -952,6 +955,9 @@ getColumn getter tableName' [ PersistText columnName
             { fcOnUpdate = parseCascade updText
             , fcOnDelete = parseCascade delText
             }
+
+    parseCollation (PersistText n) = Just (CollationName n)
+    parseCollation _ = Nothing
 
     parseCascade txt =
         case txt of
@@ -1083,11 +1089,11 @@ findAlters
     -- ^ The column that we're searching for potential alterations for.
     -> [Column]
     -> ([AlterColumn], [Column])
-findAlters defs edef col@(Column name isNull sqltype def _gen _defConstraintName _maxLen ref) cols =
+findAlters defs edef col@(Column name isNull sqltype def _gen _defConstraintName _maxLen collation ref) cols =
     case List.find (\c -> cName c == name) cols of
         Nothing ->
             ([Add' col], cols)
-        Just (Column _oldName isNull' sqltype' def' _gen' _defConstraintName' _maxLen' ref') ->
+        Just (Column _oldName isNull' sqltype' def' _gen' _defConstraintName' _maxLen' collation' ref') ->
             let refDrop Nothing = []
                 refDrop (Just ColumnReference {crConstraintName=cname}) =
                     [DropReference cname]
@@ -1123,8 +1129,8 @@ findAlters defs edef col@(Column name isNull sqltype def _gen _defConstraintName
                                             Just s -> (:) (Update' col s)
                                  in up [NotNull col]
                             _ -> []
-                modType
-                    | sqlTypeEq sqltype sqltype' = []
+                modTypeAndCollation
+                    | sqlTypeEq sqltype sqltype' && collation == collation' = []
                     -- When converting from Persistent pre-2.0 databases, we
                     -- need to make sure that TIMESTAMP WITHOUT TIME ZONE is
                     -- treated as UTC.
@@ -1134,7 +1140,7 @@ findAlters defs edef col@(Column name isNull sqltype def _gen _defConstraintName
                             , escapeF name
                             , " AT TIME ZONE 'UTC'"
                             ]]
-                    | otherwise = [ChangeType col sqltype ""]
+                    | otherwise = [ChangeType col sqltype collateExpr]
                 modDef =
                     if def == def'
                         || isJust (T.stripPrefix "nextval" =<< def')
@@ -1143,12 +1149,16 @@ findAlters defs edef col@(Column name isNull sqltype def _gen _defConstraintName
                             case def of
                                 Nothing -> [NoDefault col]
                                 Just s  -> [Default col s]
+                collateExpr 
+                    | collation == collation' = mempty
+                    | otherwise = 
+                          maybe mempty (\c -> " COLLATE " <> escapeCl c) $ collation
                 dropSafe =
                     if safeToRemove edef name
                         then error "wtf" [Drop col True]
                         else []
              in
-                ( modRef ++ modDef ++ modNull ++ modType ++ dropSafe
+                ( modRef ++ modDef ++ modNull ++ modTypeAndCollation ++ dropSafe
                 , filter (\c -> cName c /= name) cols
                 )
 
@@ -1193,7 +1203,7 @@ getAddReference allDefs entity cname cr@ColumnReference {crTableName = s, crCons
                 return $ NEL.toList $ Util.dbIdColumnsEsc escapeF entDef
 
 showColumn :: Column -> Text
-showColumn (Column n nu sqlType' def gen _defConstraintName _maxLen _ref) = T.concat
+showColumn (Column n nu sqlType' def gen _defConstraintName _maxLen _collation _ref) = T.concat
     [ escapeF n
     , " "
     , showSqlType sqlType'
@@ -1350,6 +1360,9 @@ fieldName = escapeF . fieldDBName
 
 escapeC :: ConstraintNameDB -> Text
 escapeC = escapeWith escape
+
+escapeCl :: CollationName -> Text
+escapeCl = escapeWith escape
 
 escapeE :: EntityNameDB -> Text
 escapeE = escapeWith escape
